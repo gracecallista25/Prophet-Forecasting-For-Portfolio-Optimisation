@@ -1,63 +1,109 @@
-"""Data extraction module for fetching stock data from yfinance."""
+"""Data extraction module for fetching stock data from AKShare."""
 
 import logging
 
+import akshare as ak
 import pandas as pd
-import yfinance as yf
 
 from .settings import END_DATE, START_DATE
 
 logger = logging.getLogger(__name__)
 
 
-def _process_ticker_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def _process_ticker_dataframe(
+    df: pd.DataFrame,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
     """
-    Process raw ticker DataFrame: extract price, calculate returns, normalise dates.
+    Process raw AKShare stock data.
 
     Args:
-        df: Raw DataFrame from yfinance with date index and 'Close' column
+        df: Raw DataFrame returned by AKShare.
+        start_date: Start date in YYYY-MM-DD format.
+        end_date: End date in YYYY-MM-DD format.
 
     Returns:
-        Processed DataFrame with 'Price' and 'Returns' columns and date index
+        Processed DataFrame with 'Price' and 'Returns' columns.
     """
-    # Keep only relevant column which is the close price
-    df = df[["Close"]].rename(columns={"Close": "Price"})
 
-    # Compute daily returns and drop the first date
+    # Convert the date column to datetime
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Filter data to the requested date range
+    start = pd.to_datetime(start_date)
+    end = pd.to_datetime(end_date)
+
+    df = df[
+        (df["date"] >= start)
+        & (df["date"] < end)
+    ].copy()
+
+    # Keep only date and closing price
+    df = df[["date", "close"]]
+
+    # Rename columns to match the rest of the project
+    df = df.rename(
+        columns={
+            "date": "Date",
+            "close": "Price",
+        }
+    )
+
+    # Calculate daily returns
     df["Returns"] = df["Price"].pct_change()
+
+    # Remove the first row because it has no previous day return
     df = df.dropna()
 
-    # Convert index to date type
+    # Use Date as the index
+    df = df.set_index("Date")
+
+    # Match the date format expected by the original project
     df.index = df.index.date
     df.index.name = "Date"
 
     return df
 
 
-def _extract_single_ticker_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame | None:
+def _extract_single_ticker_data(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame | None:
     """
-    Extract and process data for a single ticker.
-
-    Args:
-        ticker: Stock ticker symbol
-        start_date: Start date for data download (YYYY-MM-DD format)
-        end_date: End date for data download (YYYY-MM-DD format)
-
-    Returns:
-        Processed DataFrame or None if extraction fails
+    Extract historical data for a single US stock using AKShare.
     """
+
     try:
-        stock = yf.Ticker(ticker)
-        df = stock.history(start=start_date, end=end_date)
-        df_processed = _process_ticker_dataframe(df)
+        logger.info(f"Downloading {ticker} data from AKShare...")
+
+        # Download historical US stock data
+        df = ak.stock_us_daily(symbol=ticker)
 
         if df.empty:
             logger.warning(f"No data available for ticker: {ticker}")
             return None
 
+        df_processed = _process_ticker_dataframe(
+            df,
+            start_date,
+            end_date,
+        )
+
+        if df_processed.empty:
+            logger.warning(
+                f"No data available for {ticker} "
+                f"between {start_date} and {end_date}"
+            )
+            return None
+
+        logger.info(
+            f"Successfully downloaded {len(df_processed)} rows for {ticker}"
+        )
+
         return df_processed
 
-    # Exception if ticker doesn't exist
     except Exception as e:
         logger.error(f"Error downloading {ticker}: {e}")
         return None
@@ -71,18 +117,20 @@ def extract_data(
     """
     Extract historical stock data for multiple tickers.
 
-    Args:
-        tickers: List of stock ticker symbols
-        start_date: Start date for data download (YYYY-MM-DD format)
-        end_date: End date for data download (YYYY-MM-DD format)
-
     Returns:
-        Dictionary mapping ticker to DataFrame with columns ['Price', 'Returns']
+        Dictionary mapping ticker symbols to DataFrames containing
+        Price and Returns.
     """
+
     all_stock_data: dict[str, pd.DataFrame] = {}
 
     for ticker in tickers:
-        df_processed = _extract_single_ticker_data(ticker, start_date, end_date)
+        df_processed = _extract_single_ticker_data(
+            ticker,
+            start_date,
+            end_date,
+        )
+
         if df_processed is not None:
             all_stock_data[ticker] = df_processed
 
