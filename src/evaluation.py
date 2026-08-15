@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .model import ProphetModel
+from .return_model import ReturnRidgeModel
 
 
 def _calculate_metrics(
@@ -127,6 +128,89 @@ def walk_forward_evaluation(
 
     metrics = {
         "Prophet": prophet_metrics,
+        "Naive": naive_metrics,
+    }
+
+    return results, metrics
+
+
+def walk_forward_return_evaluation(
+    price_series: pd.Series,
+    test_days: int = 20,
+) -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
+    """
+    Evaluate the Ridge return model using walk-forward validation.
+
+    The model predicts the next-day return, which is converted
+    into a predicted stock price for comparison.
+    """
+
+    if len(price_series) <= test_days:
+        raise ValueError(
+            "Price series must contain more observations than test_days."
+        )
+
+    records = []
+
+    start_index = len(price_series) - test_days
+
+    for i in range(start_index, len(price_series)):
+        train = price_series.iloc[:i]
+
+        actual_date = pd.Timestamp(
+            price_series.index[i]
+        )
+
+        actual_price = float(
+            price_series.iloc[i]
+        )
+
+        previous_price = float(
+            train.iloc[-1]
+        )
+
+        model = ReturnRidgeModel()
+
+        predicted_return = model.predict_next(
+            train
+        )
+
+        predicted_price = previous_price * (
+            1 + predicted_return
+        )
+
+        naive_prediction = previous_price
+
+        records.append(
+            {
+                "Date": actual_date,
+                "Previous": previous_price,
+                "Actual": actual_price,
+                "Ridge": predicted_price,
+                "Predicted Return": predicted_return,
+                "Naive": naive_prediction,
+            }
+        )
+
+    results = pd.DataFrame(records)
+
+    actual = results["Actual"].to_numpy()
+    previous = results["Previous"].to_numpy()
+
+    ridge_metrics = _calculate_metrics(
+        actual,
+        results["Ridge"].to_numpy(),
+        previous,
+    )
+
+    naive_metrics = _calculate_metrics(
+        actual,
+        results["Naive"].to_numpy(),
+        previous,
+    )
+
+    metrics = {
+        "Ridge": ridge_metrics,
         "Naive": naive_metrics,
     }
 
