@@ -137,55 +137,80 @@ def walk_forward_evaluation(
 def walk_forward_return_evaluation(
     price_series: pd.Series,
     test_days: int = 20,
+    horizon: int = 1,
 ) -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
     """
     Evaluate the Ridge return model using walk-forward validation.
 
-    The model predicts the next-day return, which is converted
-    into a predicted stock price for comparison.
+    Args:
+        price_series: Historical stock prices.
+        test_days: Number of forecast origins to evaluate.
+        horizon: Number of trading days ahead to predict.
     """
 
-    if len(price_series) <= test_days:
+    if horizon < 1:
+        raise ValueError("horizon must be at least 1")
+
+    if len(price_series) <= test_days + horizon:
         raise ValueError(
-            "Price series must contain more observations than test_days."
+            "Not enough observations for the requested test period."
         )
 
     records = []
 
-    start_index = len(price_series) - test_days
+    # Gives exactly test_days forecasts
+    start_index = len(price_series) - test_days - horizon
+    end_index = len(price_series) - horizon
 
-    for i in range(start_index, len(price_series)):
-        train = price_series.iloc[:i]
+    for i in range(start_index, end_index):
 
-        actual_date = pd.Timestamp(
+        # Data available at the moment the forecast is made
+        train = price_series.iloc[: i + 1]
+
+        current_date = pd.Timestamp(
             price_series.index[i]
         )
 
-        actual_price = float(
+        forecast_date = pd.Timestamp(
+            price_series.index[i + horizon]
+        )
+
+        current_price = float(
             price_series.iloc[i]
         )
 
-        previous_price = float(
-            train.iloc[-1]
+        actual_price = float(
+            price_series.iloc[i + horizon]
         )
 
-        model = ReturnRidgeModel()
+        # Train model for the requested horizon
+        model = ReturnRidgeModel(
+            horizon=horizon
+        )
 
         predicted_return = model.predict_next(
             train
         )
 
-        predicted_price = previous_price * (
+        predicted_price = current_price * (
             1 + predicted_return
         )
 
-        naive_prediction = previous_price
+        # Persistence baseline:
+        # future price = today's price
+        naive_prediction = current_price
+
+        actual_return = (
+            actual_price / current_price - 1
+        )
 
         records.append(
             {
-                "Date": actual_date,
-                "Previous": previous_price,
+                "Origin Date": current_date,
+                "Forecast Date": forecast_date,
+                "Current": current_price,
                 "Actual": actual_price,
+                "Actual Return": actual_return,
                 "Ridge": predicted_price,
                 "Predicted Return": predicted_return,
                 "Naive": naive_prediction,
@@ -195,18 +220,18 @@ def walk_forward_return_evaluation(
     results = pd.DataFrame(records)
 
     actual = results["Actual"].to_numpy()
-    previous = results["Previous"].to_numpy()
+    current = results["Current"].to_numpy()
 
     ridge_metrics = _calculate_metrics(
         actual,
         results["Ridge"].to_numpy(),
-        previous,
+        current,
     )
 
     naive_metrics = _calculate_metrics(
         actual,
         results["Naive"].to_numpy(),
-        previous,
+        current,
     )
 
     metrics = {

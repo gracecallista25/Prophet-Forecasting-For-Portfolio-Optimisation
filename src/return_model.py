@@ -21,6 +21,7 @@ FEATURE_COLUMNS = [
 
 def build_return_features(
     price_series: pd.Series,
+    horizon: int = 1,
 ) -> pd.DataFrame:
     """
     Build technical features for next-day return prediction.
@@ -63,7 +64,9 @@ def build_return_features(
 
     # What we want to predict:
     # next trading day's return
-    features["target_return"] = returns.shift(-1)
+    features["target_return"] = (
+        prices.shift(-horizon) / prices - 1
+    )
 
     return features
 
@@ -74,8 +77,13 @@ class ReturnRidgeModel:
     def __init__(
         self,
         alpha: float = 1.0,
+        horizon: int = 1,
     ) -> None:
+        if horizon < 1:
+            raise ValueError("horizon must be at least 1")
+
         self.alpha = alpha
+        self.horizon = horizon
 
         self.model = Pipeline(
             [
@@ -91,7 +99,8 @@ class ReturnRidgeModel:
         """Fit the model using historical prices."""
 
         dataset = build_return_features(
-            price_series
+            price_series,
+            horizon=self.horizon,
         )
 
         training_data = dataset.dropna(
@@ -126,7 +135,8 @@ class ReturnRidgeModel:
         self.fit(price_series)
 
         dataset = build_return_features(
-            price_series
+            price_series,
+            horizon=self.horizon,
         )
 
         available_features = dataset[
