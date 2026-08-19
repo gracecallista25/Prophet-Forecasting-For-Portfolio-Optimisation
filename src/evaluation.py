@@ -8,6 +8,7 @@ import pandas as pd
 from .model import ProphetModel
 from .return_model import ReturnRidgeModel
 from .market_return_model import MarketReturnRidgeModel
+from .elastic_net_model import MarketReturnElasticNetModel
 
 
 def _calculate_metrics(
@@ -385,6 +386,98 @@ def walk_forward_market_evaluation(
     metrics = {
         "Market Ridge": market_metrics,
         "Ridge": ridge_metrics,
+        "Naive": naive_metrics,
+    }
+
+    return results, metrics
+
+
+def walk_forward_elastic_net_evaluation(
+    price_series: pd.Series,
+    market_price_series: pd.Series,
+    test_days: int = 40,
+    horizon: int = 20,
+    alpha: float = 0.1,
+    l1_ratio: float = 0.5,
+) -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
+    """Evaluate Elastic Net against the naive baseline."""
+
+    aligned = pd.concat(
+        {
+            "stock": price_series.astype(float),
+            "market": market_price_series.astype(float),
+        },
+        axis=1,
+        join="inner",
+    ).dropna()
+
+    if len(aligned) <= test_days + horizon:
+        raise ValueError(
+            "Not enough observations for evaluation."
+        )
+
+    records = []
+
+    start_index = len(aligned) - test_days - horizon
+    end_index = len(aligned) - horizon
+
+    for i in range(start_index, end_index):
+
+        stock_train = aligned["stock"].iloc[: i + 1]
+        market_train = aligned["market"].iloc[: i + 1]
+
+        current_price = float(
+            aligned["stock"].iloc[i]
+        )
+
+        actual_price = float(
+            aligned["stock"].iloc[i + horizon]
+        )
+
+        model = MarketReturnElasticNetModel(
+            alpha=alpha,
+            l1_ratio=l1_ratio,
+            horizon=horizon,
+        )
+
+        predicted_return = model.predict_next(
+            stock_train,
+            market_train,
+        )
+
+        predicted_price = (
+            current_price * (1 + predicted_return)
+        )
+
+        records.append(
+            {
+                "Current": current_price,
+                "Actual": actual_price,
+                "Elastic Net": predicted_price,
+                "Predicted Return": predicted_return,
+                "Naive": current_price,
+            }
+        )
+
+    results = pd.DataFrame(records)
+
+    actual = results["Actual"].to_numpy()
+    current = results["Current"].to_numpy()
+
+    elastic_metrics = _calculate_metrics(
+        actual,
+        results["Elastic Net"].to_numpy(),
+        current,
+    )
+
+    naive_metrics = _calculate_metrics(
+        actual,
+        results["Naive"].to_numpy(),
+        current,
+    )
+
+    metrics = {
+        "Elastic Net": elastic_metrics,
         "Naive": naive_metrics,
     }
 
