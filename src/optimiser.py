@@ -102,3 +102,148 @@ def optimize_portfolio_mean_variance(
         ticker: float(weight) for ticker, weight in zip(tickers, result.x, strict=True)
     }
     return weights
+
+def optimize_portfolio_with_expected_returns(
+    data_dict: dict[str, pd.DataFrame],
+    expected_returns: dict[str, float],
+    horizon: int = 20,
+    minimum_allocation: float = MINIMUM_ALLOCATION,
+    maximum_allocation: float = MAXIMUM_ALLOCATION,
+    risk_aversion: float = RISK_AVERSION,
+    lookback_days: int = 252,
+) -> dict[str, float]:
+    """
+    Optimise portfolio using forecast expected returns.
+
+    Expected returns and covariance are expressed over the same
+    forecast horizon.
+
+    Args:
+        data_dict:
+            Historical stock data with daily Returns columns.
+
+        expected_returns:
+            Forecast return for each ticker over `horizon`
+            trading days.
+
+        horizon:
+            Forecast horizon in trading days.
+
+    Returns:
+        Optimal portfolio weights.
+    """
+
+    if horizon < 1:
+        raise ValueError(
+            "horizon must be at least 1"
+        )
+
+    tickers = list(data_dict.keys())
+
+    missing = [
+        ticker
+        for ticker in tickers
+        if ticker not in expected_returns
+    ]
+
+    if missing:
+        raise ValueError(
+            f"Missing expected returns for: {missing}"
+        )
+
+    # Historical DAILY covariance
+    _, daily_cov = calculate_mean_variance(
+        data_dict,
+        lookback_days=lookback_days,
+    )
+
+    # Approximate covariance over the forecast horizon.
+    #
+    # Example:
+    # daily variance × 20
+    # ≈ 20-trading-day variance
+    horizon_cov = daily_cov * horizon
+
+    # Forecast expected returns are already expressed
+    # over the requested horizon.
+    mu = pd.Series(
+        {
+            ticker: expected_returns[ticker]
+            for ticker in tickers
+        }
+    )
+
+    # Make sure rows/columns follow exactly the ticker order.
+    horizon_cov = horizon_cov.loc[
+        tickers,
+        tickers,
+    ]
+
+    num_assets = len(tickers)
+
+    def objective(
+        weights: np.ndarray,
+    ) -> float:
+
+        portfolio_return = float(
+            np.dot(weights, mu)
+        )
+
+        portfolio_variance = float(
+            np.dot(
+                weights.T,
+                np.dot(
+                    horizon_cov,
+                    weights,
+                ),
+            )
+        )
+
+        return -(
+            portfolio_return
+            - 0.5
+            * risk_aversion
+            * portfolio_variance
+        )
+
+    constraints = [
+        {
+            "type": "eq",
+            "fun": lambda weights:
+                np.sum(weights) - 1,
+        }
+    ]
+
+    bounds = tuple(
+        (
+            minimum_allocation,
+            maximum_allocation,
+        )
+        for _ in range(num_assets)
+    )
+
+    initial_weights = np.array(
+        [1 / num_assets] * num_assets
+    )
+
+    result = minimize(
+        objective,
+        initial_weights,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+    )
+
+    if not result.success:
+        raise ValueError(
+            f"Optimisation failed: {result.message}"
+        )
+
+    return {
+        ticker: float(weight)
+        for ticker, weight in zip(
+            tickers,
+            result.x,
+            strict=True,
+        )
+    }
