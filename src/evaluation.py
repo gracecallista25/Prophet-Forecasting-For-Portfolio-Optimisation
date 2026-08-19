@@ -7,6 +7,7 @@ import pandas as pd
 
 from .model import ProphetModel
 from .return_model import ReturnRidgeModel
+from .market_return_model import MarketReturnRidgeModel
 
 
 def _calculate_metrics(
@@ -235,6 +236,151 @@ def walk_forward_return_evaluation(
     )
 
     metrics = {
+        "Ridge": ridge_metrics,
+        "Naive": naive_metrics,
+    }
+
+    return results, metrics
+
+
+def walk_forward_market_evaluation(
+    price_series: pd.Series,
+    market_price_series: pd.Series,
+    test_days: int = 20,
+    horizon: int = 20,
+) -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
+    """
+    Compare market-aware Ridge, original Ridge, and naive baseline.
+    """
+
+    if horizon < 1:
+        raise ValueError("horizon must be at least 1")
+
+    # Make sure stock and SPY use exactly the same trading dates
+    aligned = pd.concat(
+        {
+            "stock": price_series.astype(float),
+            "market": market_price_series.astype(float),
+        },
+        axis=1,
+        join="inner",
+    ).dropna()
+
+    if len(aligned) <= test_days + horizon:
+        raise ValueError(
+            "Not enough observations for the requested evaluation."
+        )
+
+    records = []
+
+    start_index = len(aligned) - test_days - horizon
+    end_index = len(aligned) - horizon
+
+    for i in range(start_index, end_index):
+
+        stock_train = aligned["stock"].iloc[: i + 1]
+        market_train = aligned["market"].iloc[: i + 1]
+
+        origin_date = pd.Timestamp(
+            aligned.index[i]
+        )
+
+        forecast_date = pd.Timestamp(
+            aligned.index[i + horizon]
+        )
+
+        current_price = float(
+            aligned["stock"].iloc[i]
+        )
+
+        actual_price = float(
+            aligned["stock"].iloc[i + horizon]
+        )
+
+        # -------------------------
+        # Market-aware Ridge
+        # -------------------------
+
+        market_model = MarketReturnRidgeModel(
+            horizon=horizon
+        )
+
+        market_return_prediction = (
+            market_model.predict_next(
+                stock_train,
+                market_train,
+            )
+        )
+
+        market_price_prediction = (
+            current_price
+            * (1 + market_return_prediction)
+        )
+
+        # -------------------------
+        # Original Ridge
+        # -------------------------
+
+        ridge_model = ReturnRidgeModel(
+            horizon=horizon
+        )
+
+        ridge_return_prediction = (
+            ridge_model.predict_next(
+                stock_train
+            )
+        )
+
+        ridge_price_prediction = (
+            current_price
+            * (1 + ridge_return_prediction)
+        )
+
+        # -------------------------
+        # Naive baseline
+        # -------------------------
+
+        naive_prediction = current_price
+
+        records.append(
+            {
+                "Origin Date": origin_date,
+                "Forecast Date": forecast_date,
+                "Current": current_price,
+                "Actual": actual_price,
+                "Market Ridge": market_price_prediction,
+                "Market Return": market_return_prediction,
+                "Ridge": ridge_price_prediction,
+                "Ridge Return": ridge_return_prediction,
+                "Naive": naive_prediction,
+            }
+        )
+
+    results = pd.DataFrame(records)
+
+    actual = results["Actual"].to_numpy()
+    current = results["Current"].to_numpy()
+
+    market_metrics = _calculate_metrics(
+        actual,
+        results["Market Ridge"].to_numpy(),
+        current,
+    )
+
+    ridge_metrics = _calculate_metrics(
+        actual,
+        results["Ridge"].to_numpy(),
+        current,
+    )
+
+    naive_metrics = _calculate_metrics(
+        actual,
+        results["Naive"].to_numpy(),
+        current,
+    )
+
+    metrics = {
+        "Market Ridge": market_metrics,
         "Ridge": ridge_metrics,
         "Naive": naive_metrics,
     }
