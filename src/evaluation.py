@@ -9,6 +9,7 @@ from .model import ProphetModel
 from .return_model import ReturnRidgeModel
 from .market_return_model import MarketReturnRidgeModel
 from .elastic_net_model import MarketReturnElasticNetModel
+from .gradient_boosting_model import MarketGradientBoostingModel
 
 
 def _calculate_metrics(
@@ -478,6 +479,101 @@ def walk_forward_elastic_net_evaluation(
 
     metrics = {
         "Elastic Net": elastic_metrics,
+        "Naive": naive_metrics,
+    }
+
+    return results, metrics
+
+def walk_forward_gradient_boosting_evaluation(
+    price_series: pd.Series,
+    market_price_series: pd.Series,
+    test_days: int = 40,
+    horizon: int = 20,
+    learning_rate: float = 0.05,
+    max_iter: int = 200,
+    max_leaf_nodes: int = 15,
+    l2_regularization: float = 1.0,
+) -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
+    """Evaluate Gradient Boosting against the naive baseline."""
+
+    aligned = pd.concat(
+        {
+            "stock": price_series.astype(float),
+            "market": market_price_series.astype(float),
+        },
+        axis=1,
+        join="inner",
+    ).dropna()
+
+    if len(aligned) <= test_days + horizon:
+        raise ValueError(
+            "Not enough observations for evaluation."
+        )
+
+    records = []
+
+    start_index = len(aligned) - test_days - horizon
+    end_index = len(aligned) - horizon
+
+    for i in range(start_index, end_index):
+
+        stock_train = aligned["stock"].iloc[: i + 1]
+        market_train = aligned["market"].iloc[: i + 1]
+
+        current_price = float(
+            aligned["stock"].iloc[i]
+        )
+
+        actual_price = float(
+            aligned["stock"].iloc[i + horizon]
+        )
+
+        model = MarketGradientBoostingModel(
+            horizon=horizon,
+            learning_rate=learning_rate,
+            max_iter=max_iter,
+            max_leaf_nodes=max_leaf_nodes,
+            l2_regularization=l2_regularization,
+        )
+
+        predicted_return = model.predict_next(
+            stock_train,
+            market_train,
+        )
+
+        predicted_price = (
+            current_price * (1 + predicted_return)
+        )
+
+        records.append(
+            {
+                "Current": current_price,
+                "Actual": actual_price,
+                "Gradient Boosting": predicted_price,
+                "Predicted Return": predicted_return,
+                "Naive": current_price,
+            }
+        )
+
+    results = pd.DataFrame(records)
+
+    actual = results["Actual"].to_numpy()
+    current = results["Current"].to_numpy()
+
+    gb_metrics = _calculate_metrics(
+        actual,
+        results["Gradient Boosting"].to_numpy(),
+        current,
+    )
+
+    naive_metrics = _calculate_metrics(
+        actual,
+        results["Naive"].to_numpy(),
+        current,
+    )
+
+    metrics = {
+        "Gradient Boosting": gb_metrics,
         "Naive": naive_metrics,
     }
 
