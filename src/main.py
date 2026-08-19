@@ -10,10 +10,14 @@ import pandas as pd
 
 from src.database import save_results_to_supabase
 from src.extractor import extract_data
-from src.model import ProphetModel
-from src.optimiser import optimize_portfolio_mean_variance
-from src.processor import append_predictions, collect_recent_prices, preprocess_data
+from src.optimiser import optimize_portfolio_with_expected_returns
+from src.processor import collect_recent_prices, preprocess_data
 from src.settings import END_DATE, PORTFOLIO_TICKERS, START_DATE
+from src.model_selector import (
+    DEFAULT_HORIZON,
+    predict_with_model,
+    select_best_model,
+)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -26,72 +30,155 @@ def run_optimisation(
     end_date: str = END_DATE,
 ) -> dict[str, Any]:
     """
-    Run portfolio optimisation: pull data, predict, calculate allocation, and log result.
+    Run the full forecasting and portfolio optimisation pipeline.
+    Pipeline:
+    1. Extract stock + SPY market data
+    2. Preprocess portfolio stock data
+    3. Select the best forecasting model for each stock
+    4. Generate 20-trading-day return forecasts
+    5. Optimise portfolio using forecast expected returns
+    6. Return predictions, model choices, and portfolio weights
 
     Args:
-        tickers: List of stock ticker symbols
-        start_date: Start date for historical data (YYYY-MM-DD format). Defaults to START_DATE.
-        end_date: End date for historical data (YYYY-MM-DD format). Defaults to END_DATE.
+        tickers:
+            List of portfolio stock ticker symbols.
+
+        start_date:
+            Start date for historical data in YYYY-MM-DD format.
+
+        end_date:
+            End date for historical data in YYYY-MM-DD format.
 
     Returns:
-        Dictionary containing optimisation results with keys:
-        - date: date object representing date optimisation was run
-        - prediction_date: date object for the prediction (next day after last historical date)
-        - predictions: dict[str, float] of predicted prices for each ticker
-        - current_prices: dict[str, float] of current prices for each ticker
-        - predicted_returns: dict[str, float] of predicted returns for each ticker
-        - weights: dict[str, float] of optimal portfolio weights for each ticker
-
-    Returns empty dict if data extraction fails.
+        Dictionary containing:
+        - date
+        - forecast_horizon_days
+        - selected_models
+        - validation_mape
+        - predictions
+        - predicted_returns
+        - actual_prices_last_month
+        - weights
     """
 
-    as_of_date = pd.to_datetime(end_date).date()
-    logger.info(f"Starting portfolio optimisation for tickers: {tickers} as of {as_of_date}")
+    if not tickers:
+        logger.warning("No portfolio tickers provided.")
+        return {}
 
-    # 1. Extract historical data
+    # 1. Extract portfolio stocks + SPY market data
+    logger.info(f"Starting portfolio optimisation for tickers: {tickers}")
+
+    market_ticker = "SPY"
+    extraction_tickers = list(dict.fromkeys([*tickers, market_ticker]))
+
     logger.info("Extracting historical data...")
-    all_stock_data = extract_data(tickers, start_date=start_date, end_date=end_date)
+    all_stock_data = extract_data(
+        extraction_tickers,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
     if not all_stock_data:
         logger.warning("No data extracted. Exiting optimisation.")
         return {}
 
-    # 2. Preprocess historical data
-    logger.info("Preprocessing data...")
-    portfolio_data = preprocess_data(all_stock_data)
+    # 2. Validate required data
+    if market_ticker not in all_stock_data:
+        logger.warning("SPY market data unavailable. Exiting optimisation.")
+        return {}
 
-    # 3. Predict next step using Prophet
-    logger.info("Generating predictions...")
-    model = ProphetModel()
-    predictions, predicted_returns = model.predict_for_tickers(portfolio_data)
+    missing_tickers = [ticker for ticker in tickers if ticker not in all_stock_data]
+    if missing_tickers:
+        logger.warning(f"Missing stock data for: {missing_tickers}")
+        return {}
 
-    # 4. Collect actual price history for the past month
+    market_prices = all_stock_data[market_ticker]["Price"]
+    portfolio_stock_data = {ticker: all_stock_data[ticker] for ticker in tickers}
+
+    # 3. Preprocess portfolio data
+    logger.info("Preprocessing portfolio data...")
+    portfolio_data = preprocess_data(portfolio_stock_data)
+
+    if not portfolio_data:
+        logger.warning("No portfolio data available after preprocessing.")
+        return {}
+
+    as_of_date = portfolio_data[tickers[0]].index[-1]
+
+    predictions: dict[str, float] = {}
+    predicted_returns: dict[str, float] = {}
+    selected_models: dict[str, str] = {}
+    validation_mape: dict[str, dict[str, float]] = {}
+
+    # 4. Select model + forecast each stock
+    logger.info(
+        f"Selecting forecasting models for {DEFAULT_HORIZON}-trading-day horizon..."
+    )
+
+    for ticker in tickers:
+        price_series = portfolio_data[ticker]["Price"]
+
+        selection = select_best_model(
+            price_series,
+            market_prices,
+            horizon=DEFAULT_HORIZON,
+        )
+
+        selected_models[ticker] = selection.selected_model
+        validation_mape[ticker] = selection.validation_mape
+
+        forecast = predict_with_model(
+            selection.selected_model,
+            price_series,
+            market_prices,
+            horizon=DEFAULT_HORIZON,
+        )
+
+        predictions[ticker] = float(forecast["predicted_price"])
+        predicted_returns[ticker] = float(forecast["predicted_return"])
+
+        logger.info(
+            f"{ticker}: {selection.selected_model} selected, "
+            f"predicted return = {predicted_returns[ticker] * 100:.2f}%"
+        )
+
+    # 5. Collect recent actual prices
     actual_prices_last_month = collect_recent_prices(portfolio_data)
 
-    # 5. Append predictions to historical data
-    predicted_data = append_predictions(portfolio_data, predictions, predicted_returns)
-
-    # 6. Optimise portfolio using predicted returns as expected returns
+    # 6. Portfolio optimisation
     logger.info("Calculating optimal portfolio allocation...")
-    weights_dict = optimize_portfolio_mean_variance(predicted_data)
+    weights_dict = optimize_portfolio_with_expected_returns(
+        portfolio_data,
+        predicted_returns,
+        horizon=DEFAULT_HORIZON,
+    )
 
     # 7. Log results
     logger.info("Portfolio Optimisation Results")
     logger.info(f"Date: {as_of_date}")
 
-    logger.info("\nPredicted Prices (Next Day):")
+    logger.info("\nSelected Models:")
+    for ticker, model_name in selected_models.items():
+        logger.info(f"  {ticker}: {model_name}")
+
+    logger.info(f"\nPredicted Prices ({DEFAULT_HORIZON} Trading Days):")
     for ticker, price in predictions.items():
         logger.info(f"  {ticker}: ${price:.2f}")
 
-    logger.info("\nPredicted Returns:")
-    for ticker, ret in predicted_returns.items():
-        logger.info(f"  {ticker}: {ret * 100:.2f}%")
+    logger.info(f"\nPredicted {DEFAULT_HORIZON}-Day Returns:")
+    for ticker, predicted_return in predicted_returns.items():
+        logger.info(f"  {ticker}: {predicted_return * 100:.2f}%")
 
     logger.info("\nOptimal Portfolio Weights:")
     for ticker, weight in weights_dict.items():
         logger.info(f"  {ticker}: {weight * 100:.2f}%")
 
+    # 8. Return results
     return {
         "date": as_of_date,
+        "forecast_horizon_days": DEFAULT_HORIZON,
+        "selected_models": selected_models,
+        "validation_mape": validation_mape,
         "predictions": predictions,
         "predicted_returns": predicted_returns,
         "actual_prices_last_month": actual_prices_last_month,
