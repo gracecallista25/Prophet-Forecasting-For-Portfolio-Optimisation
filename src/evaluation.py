@@ -248,6 +248,7 @@ def walk_forward_market_evaluation(
     market_price_series: pd.Series,
     test_days: int = 20,
     horizon: int = 20,
+    alpha: float = 1.0,
 ) -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
     """
     Compare market-aware Ridge, original Ridge, and naive baseline.
@@ -302,7 +303,8 @@ def walk_forward_market_evaluation(
         # -------------------------
 
         market_model = MarketReturnRidgeModel(
-            horizon=horizon
+            horizon=horizon,
+            alpha=alpha,
         )
 
         market_return_prediction = (
@@ -322,7 +324,8 @@ def walk_forward_market_evaluation(
         # -------------------------
 
         ridge_model = ReturnRidgeModel(
-            horizon=horizon
+            horizon=horizon,
+            alpha=alpha,
         )
 
         ridge_return_prediction = (
