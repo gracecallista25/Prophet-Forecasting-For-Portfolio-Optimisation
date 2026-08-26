@@ -94,50 +94,47 @@ def build_price_history(row: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame] | N
 
 @lru_cache(maxsize=1)
 def compute_prediction_performance(data_json: str) -> pd.DataFrame:
-    """Compare past predictions against actual outcomes using successive days."""
+    """Evaluate forecasts once their target-date actual price is available."""
+
     df = pd.read_json(data_json, orient="records", convert_dates=False)
+
     if df.empty:
-        return df
+        return pd.DataFrame()
 
     df["as_of_date"] = pd.to_datetime(df["as_of_date"]).dt.date
-    if "actual_prices_last_month" in df.columns:
-        df["actual_prices_last_month"] = df["actual_prices_last_month"].apply(_parse_price_history)
-    df = df.sort_values(["ticker", "as_of_date"])
+    df["forecast_target_date"] = pd.to_datetime(df["forecast_target_date"]).dt.date
+    df["actual_prices_last_month"] = df["actual_prices_last_month"].apply(_parse_price_history)
 
-    records: list[dict[str, object]] = []
+    df["actual_price"] = df["actual_prices_last_month"].apply(
+        lambda prices: float(prices[-1]) if prices else None
+    )
 
-    for ticker, group in df.groupby("ticker"):
-        group = group.reset_index(drop=True)
-        for idx in range(len(group) - 1):
-            current = group.loc[idx]
+    forecasts = df[
+        ["ticker", "as_of_date", "forecast_target_date", "predicted_price"]
+    ].rename(
+        columns={
+            "as_of_date": "prediction_date",
+            "forecast_target_date": "target_date",
+        }
+    )
 
-            prices = current.get("actual_prices_last_month")
-            if not prices:
-                continue
+    actuals = df[["ticker", "as_of_date", "actual_price"]].rename(
+        columns={"as_of_date": "target_date"}
+    )
 
-            next_row = group.loc[idx + 1]
-            actual_next_price = _latest_price_from_row(next_row)
-            if actual_next_price is None:
-                continue
+    results = forecasts.merge(actuals, on=["ticker", "target_date"], how="inner")
+    results = results.dropna(subset=["predicted_price", "actual_price"])
 
-            records.append(
-                {
-                    "ticker": ticker,
-                    "prediction_date": current["as_of_date"],
-                    "evaluation_date": next_row["as_of_date"],
-                    "predicted_price": float(current["predicted_price"]),
-                    "actual_price": actual_next_price,
-                    "error": actual_next_price - float(current["predicted_price"]),
-                }
-            )
+    if results.empty:
+        return pd.DataFrame()
 
-    perf_df = pd.DataFrame(records)
-    if perf_df.empty:
-        return perf_df
+    results["predicted_price"] = results["predicted_price"].astype(float)
+    results["actual_price"] = results["actual_price"].astype(float)
+    results["error"] = results["actual_price"] - results["predicted_price"]
+    results["absolute_error"] = results["error"].abs()
+    results["error_pct"] = results["absolute_error"] / results["actual_price"] * 100
 
-    perf_df["absolute_error"] = perf_df["error"].abs()
-    perf_df["error_pct"] = perf_df["error"] / perf_df["predicted_price"]
-    return perf_df
+    return results
 
 
 def _latest_price_from_row(row: pd.Series) -> float | None:
@@ -291,10 +288,38 @@ def run_dashboard() -> None:
 
     st.subheader("Prediction Accuracy")
 
-    st.info(
-        f"Accuracy tracking for {horizon}-trading-day forecasts will be evaluated "
-        "after each forecast reaches its target date."
-    )
+    if target_date is None:
+        st.info("No forecast target date is available.")
+
+    elif selected_date < target_date:
+        st.info(f"⏳ Pending until {target_date:%Y-%m-%d}.")
+
+    else:
+        perf_df = compute_prediction_performance(
+            df.to_json(orient="records", date_format="iso")
+        )
+
+        ticker_perf = perf_df[
+            (perf_df["ticker"] == selected_ticker)
+            & (perf_df["prediction_date"] == selected_date)
+        ]
+
+        if ticker_perf.empty:
+            st.info("Actual price data is not available for this forecast yet.")
+
+        else:
+            result = ticker_perf.iloc[0]
+
+            metrics = [
+                ("Predicted Price", f"${result['predicted_price']:.2f}"),
+                ("Actual Price", f"${result['actual_price']:.2f}"),
+                ("Absolute Error", f"${result['absolute_error']:.2f}"),
+                ("Error (%)", f"{result['error_pct']:.2f}%"),
+            ]
+
+            for col, (label, value) in zip(st.columns(4), metrics):
+                with col:
+                    st.metric(label, value)
 
 
 def main() -> None:
