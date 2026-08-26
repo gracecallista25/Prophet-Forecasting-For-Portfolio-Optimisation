@@ -7,6 +7,7 @@ import sys
 from typing import Any
 
 import pandas as pd
+import pandas_market_calendars as mcal
 
 from src.database import save_results_to_supabase
 from src.extractor import extract_data
@@ -22,6 +23,20 @@ from src.model_selector import (
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def get_forecast_target_date(as_of_date, horizon: int):
+    """Return the target date after a number of NYSE trading days."""
+    calendar = mcal.get_calendar("NYSE")
+    start_date = pd.Timestamp(as_of_date) + pd.Timedelta(days=1)
+    end_date = start_date + pd.Timedelta(days=horizon * 3)
+
+    schedule = calendar.schedule(start_date=start_date, end_date=end_date)
+
+    if len(schedule) < horizon:
+        raise ValueError("Not enough future trading days to calculate target date.")
+
+    return schedule.index[horizon - 1].date()
 
 
 def run_optimisation(
@@ -104,6 +119,8 @@ def run_optimisation(
         return {}
 
     as_of_date = portfolio_data[tickers[0]].index[-1]
+    forecast_target_date = get_forecast_target_date(as_of_date, DEFAULT_HORIZON)
+    logger.info(f"Forecast target date: {forecast_target_date}")
 
     predictions: dict[str, float] = {}
     predicted_returns: dict[str, float] = {}
@@ -176,6 +193,7 @@ def run_optimisation(
     # 8. Return results
     return {
         "date": as_of_date,
+        "forecast_target_date": forecast_target_date,
         "forecast_horizon_days": DEFAULT_HORIZON,
         "selected_models": selected_models,
         "validation_mape": validation_mape,

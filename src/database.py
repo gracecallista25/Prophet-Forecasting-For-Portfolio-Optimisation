@@ -1,7 +1,5 @@
 """Database operations for saving optimisation results to Supabase."""
 
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -9,9 +7,12 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from dotenv import load_dotenv
 from supabase import Client, create_client
 
 from src.settings import SUPABASE_TABLE_NAME
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +52,13 @@ def save_results_to_supabase(result: dict[str, Any]) -> None:
         )
 
     as_of_date = result.get("date")
+    forecast_target_date = result.get("forecast_target_date")
     predictions = result.get("predictions", {})
     predicted_returns = result.get("predicted_returns", {})
     weights = result.get("weights", {})
     actual_prices_last_month = result.get("actual_prices_last_month", {})
+    forecast_horizon_days = result.get("forecast_horizon_days")
+    selected_models = result.get("selected_models", {})
 
     if not predictions:
         logger.warning("No predictions to save")
@@ -67,9 +71,16 @@ def save_results_to_supabase(result: dict[str, Any]) -> None:
             "id": str(uuid.uuid4()),
             "created_at": datetime.now().isoformat(),
             "as_of_date": as_of_date.isoformat() if as_of_date else None,
+            "forecast_target_date": (
+                forecast_target_date.isoformat()
+                if forecast_target_date
+                else None
+            ),
             "ticker": ticker,
             "predicted_price": float(predictions.get(ticker, 0.0)),
             "predicted_return": float(predicted_returns.get(ticker, 0.0)),
+            "forecast_horizon_days": forecast_horizon_days,
+            "selected_model": selected_models.get(ticker),
             "actual_prices_last_month": json.dumps(actual_prices_last_month.get(ticker, [])),
             "portfolio_weight": float(weights.get(ticker, 0.0)),
         }

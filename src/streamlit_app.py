@@ -1,4 +1,4 @@
-"""Streamlit dashboard for Prophet-based portfolio forecasts."""
+"""Streamlit dashboard for portfolio forecasting and optimisation."""
 
 from __future__ import annotations
 
@@ -169,171 +169,132 @@ def pie_chart(weights_df: pd.DataFrame):
 
 def run_dashboard() -> None:
     st.title("📊 Portfolio Forecast Dashboard")
-    st.caption(
-        "Latest Prophet predictions, portfolio weights, and performance analysis sourced from Supabase."
-    )
+    st.caption("Model-selected return forecasts and portfolio optimisation results sourced from Supabase.")
 
     df = load_supabase_predictions()
+
     if df.empty:
-        st.info("No prediction data available. Run the optimisation pipeline to populate Supabase.")
+        st.info("No prediction data available. Run the optimisation pipeline first.")
         return
 
     available_dates = sorted(df["as_of_date"].unique(), reverse=True)
+
     selected_date = st.selectbox(
-        "Select as-of date", options=available_dates, format_func=lambda d: d.strftime("%Y-%m-%d")
+        "Select as-of date",
+        options=available_dates,
+        format_func=lambda d: d.strftime("%Y-%m-%d"),
     )
 
     date_df = df[df["as_of_date"] == selected_date].copy().sort_values("ticker")
 
-    # Precompute prediction performance dataframe for all tickers
-    perf_df = compute_prediction_performance(df.to_json(orient="records", date_format="iso"))
+    horizon = 20
 
-    st.subheader("Portfolio Weights DEMO")
+    if "forecast_horizon_days" in date_df.columns:
+        horizon_values = date_df["forecast_horizon_days"].dropna()
+
+        if not horizon_values.empty:
+            horizon = int(horizon_values.iloc[0])
+
+    target_date = None
+
+    if "forecast_target_date" in date_df.columns:
+        target_dates = date_df["forecast_target_date"].dropna()
+
+        if not target_dates.empty:
+            target_date = pd.to_datetime(target_dates.iloc[0]).date()
+
+    if target_date:
+        st.caption(
+            f"Forecast horizon: {horizon} trading days | "
+            f"Target date: {target_date.strftime('%Y-%m-%d')}"
+        )
+    else:
+        st.caption(f"Forecast horizon: {horizon} trading days")
+
+    st.subheader("Portfolio Allocation")
+
     weight_col, table_col = st.columns([1, 1])
+
     with weight_col:
         pie = pie_chart(date_df)
+
         if pie is None:
-            st.info("Weights are zero or missing for this date.")
+            st.info("Portfolio weights are unavailable.")
         else:
             st.plotly_chart(pie, use_container_width=True)
 
     with table_col:
-        summary_table = date_df[["ticker", "predicted_price", "predicted_return"]].copy()
-        summary_table["predicted_return_pct"] = summary_table["predicted_return"] * 100
+        columns = ["ticker", "predicted_price", "predicted_return", "portfolio_weight"]
+
+        if "selected_model" in date_df.columns:
+            columns.insert(1, "selected_model")
+
+        summary_table = date_df[columns].copy()
+        summary_table["predicted_return"] *= 100
+        summary_table["portfolio_weight"] *= 100
+
         summary_table = summary_table.rename(
             columns={
                 "ticker": "Ticker",
+                "selected_model": "Model",
                 "predicted_price": "Predicted Price",
-                "predicted_return_pct": "Predicted Return (%)",
+                "predicted_return": "Expected Return (%)",
+                "portfolio_weight": "Weight (%)",
             }
         )
+
         st.dataframe(
-            summary_table[["Ticker", "Predicted Price", "Predicted Return (%)"]],
+            summary_table,
             hide_index=True,
             use_container_width=True,
             column_config={
                 "Predicted Price": st.column_config.NumberColumn(format="$%.2f"),
-                "Predicted Return (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                "Expected Return (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                "Weight (%)": st.column_config.NumberColumn(format="%.2f%%"),
             },
         )
 
     tickers = date_df["ticker"].tolist()
-    selected_ticker = st.selectbox("Select ticker for detail view", options=tickers, index=0)
+
+    selected_ticker = st.selectbox(
+        "Select ticker for detail view",
+        options=tickers,
+    )
 
     ticker_row = date_df.set_index("ticker").loc[selected_ticker]
+
     latest_actual = _latest_actual_price(ticker_row)
+    selected_model = ticker_row.get("selected_model", "Unknown")
+    predicted_price = float(ticker_row["predicted_price"])
+    predicted_return = float(ticker_row["predicted_return"])
+    portfolio_weight = float(ticker_row["portfolio_weight"])
 
-    col1, col2, col3 = st.columns(3)
+    st.subheader(f"{selected_ticker} Forecast")
+
+    col1, col2, col3, col4 = st.columns(4)
+
     with col1:
-        st.metric(
-            "Latest Actual Price", f"${latest_actual:.2f}" if latest_actual is not None else "—"
-        )
+        latest_price = f"${latest_actual:.2f}" if latest_actual is not None else "—"
+        st.metric("Latest Price", latest_price)
+
     with col2:
-        st.metric("Predicted Price", f"${ticker_row['predicted_price']:.2f}")
+        st.metric(f"{horizon}-Day Predicted Price", f"${predicted_price:.2f}")
+
     with col3:
-        st.metric("Predicted Return", f"{ticker_row['predicted_return']*100:.2f}%")
+        st.metric(f"{horizon}-Day Expected Return", f"{predicted_return * 100:.2f}%")
 
-    st.subheader(f"Price Trend · {selected_ticker}")
-    ticker_perf_for_trend = perf_df[perf_df["ticker"] == selected_ticker].copy()
-    if ticker_perf_for_trend.empty:
-        st.info("No historical prediction data available for this ticker yet.")
-    else:
-        # Determine dynamic y-axis range: -20% below min and +20% above max
-        min_price = float(ticker_perf_for_trend[["actual_price", "predicted_price"]].min().min())
-        max_price = float(ticker_perf_for_trend[["actual_price", "predicted_price"]].max().max())
+    with col4:
+        st.metric("Portfolio Weight", f"{portfolio_weight * 100:.2f}%")
 
-        default_min = min_price * 0.8
-        default_max = max_price * 1.2
-
-        # Allow some extra room in the slider bounds
-        slider_min = float(round(default_min * 0.9, 2))
-        slider_max = float(round(default_max * 1.1, 2))
-
-        y_min, y_max = st.slider(
-            "Price range (y-axis)",
-            min_value=slider_min,
-            max_value=slider_max,
-            value=(float(round(default_min, 2)), float(round(default_max, 2))),
-        )
-
-        long_df_trend = ticker_perf_for_trend.melt(
-            id_vars=["evaluation_date", "prediction_date"],
-            value_vars=["actual_price", "predicted_price"],
-            var_name="series",
-            value_name="price",
-        )
-        line_chart_trend = (
-            alt.Chart(long_df_trend)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("evaluation_date:T", title="Evaluation Date"),
-                y=alt.Y("price:Q", title="Price (USD)", scale=alt.Scale(domain=[y_min, y_max])),
-                color=alt.Color(
-                    "series:N",
-                    title="Series",
-                    scale=alt.Scale(
-                        domain=["actual_price", "predicted_price"],
-                        range=["#1f77b4", "#ff7f0e"],
-                    ),
-                    legend=alt.Legend(
-                        labelExpr="datum.value == 'actual_price' ? 'Actual' : 'Predicted'"
-                    ),
-                ),
-                tooltip=[
-                    alt.Tooltip("prediction_date:T", title="Prediction Date"),
-                    alt.Tooltip("evaluation_date:T", title="Evaluation Date"),
-                    alt.Tooltip("series:N", title="Series"),
-                    alt.Tooltip("price:Q", title="Price", format=".2f"),
-                ],
-            )
-        )
-        st.altair_chart(line_chart_trend, use_container_width=True)
-        st.caption("Lines show historical predicted vs actual next-day prices for this ticker.")
+    model_display = str(selected_model).replace("_", " ").title()
+    st.write(f"**Selected model:** {model_display}")
 
     st.subheader("Prediction Accuracy")
-    if perf_df.empty:
-        st.info(
-            "Not enough historical runs to evaluate predictions yet. Check back after multiple runs."
-        )
-    else:
-        ticker_perf = perf_df[perf_df["ticker"] == selected_ticker].copy()
-        if ticker_perf.empty:
-            st.info("No historical prediction data for this ticker yet.")
-        else:
-            ticker_perf["error_pct"] = ticker_perf["error_pct"] * 100
-            ticker_perf_display = ticker_perf.rename(
-                columns={
-                    "prediction_date": "Prediction Date",
-                    "evaluation_date": "Evaluation Date",
-                    "predicted_price": "Predicted Price",
-                    "actual_price": "Actual Price",
-                    "error": "Error",
-                    "absolute_error": "Absolute Error",
-                    "error_pct": "Error (%)",
-                }
-            )
-            st.dataframe(
-                ticker_perf_display[
-                    [
-                        "Prediction Date",
-                        "Evaluation Date",
-                        "Predicted Price",
-                        "Actual Price",
-                        "Error",
-                        "Absolute Error",
-                        "Error (%)",
-                    ]
-                ],
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Predicted Price": st.column_config.NumberColumn(format="$%.2f"),
-                    "Actual Price": st.column_config.NumberColumn(format="$%.2f"),
-                    "Error": st.column_config.NumberColumn(format="$%.2f"),
-                    "Absolute Error": st.column_config.NumberColumn(format="$%.2f"),
-                    "Error (%)": st.column_config.NumberColumn(format="%.2f%%"),
-                },
-            )
+
+    st.info(
+        f"Accuracy tracking for {horizon}-trading-day forecasts will be evaluated "
+        "after each forecast reaches its target date."
+    )
 
 
 def main() -> None:
