@@ -227,7 +227,7 @@ def run_dashboard() -> None:
 
     with col1:
         latest_price = f"${latest_actual:.2f}" if latest_actual is not None else "—"
-        st.metric("Latest Price", latest_price)
+        st.metric("Price at Forecast Date", latest_price)
 
     with col2:
         st.metric(f"{horizon}-Day Predicted Price", f"${predicted_price:.2f}")
@@ -245,17 +245,31 @@ def run_dashboard() -> None:
 
     if pd.notna(actual_target_price):
         actual_target_price = float(actual_target_price)
+        actual_return = actual_target_price / latest_actual - 1
         absolute_error = abs(actual_target_price - predicted_price)
         error_pct = absolute_error / actual_target_price * 100
+
+        if predicted_return == 0:
+            direction = "➖ Neutral"
+        elif predicted_return * actual_return > 0:
+            direction = "✅ Correct"
+        else:
+            direction = "❌ Wrong"
 
         metrics = [
             ("Predicted Price", f"${predicted_price:.2f}"),
             ("Actual Price", f"${actual_target_price:.2f}"),
+            ("Predicted Return", f"{predicted_return * 100:.2f}%"),
+            ("Actual Return", f"{actual_return * 100:.2f}%"),
             ("Absolute Error", f"${absolute_error:.2f}"),
             ("Error (%)", f"{error_pct:.2f}%"),
+            ("Direction", direction),
         ]
 
-        for col, (label, value) in zip(st.columns(4), metrics):
+        for col, (label, value) in zip(st.columns(4), metrics[:4]):
+            col.metric(label, value)
+
+        for col, (label, value) in zip(st.columns(3), metrics[4:]):
             col.metric(label, value)
 
     elif target_date and date.today() < target_date:
