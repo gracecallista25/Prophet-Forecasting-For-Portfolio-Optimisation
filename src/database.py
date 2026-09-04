@@ -57,6 +57,7 @@ def save_results_to_supabase(result: dict[str, Any]) -> None:
     predicted_returns = result.get("predicted_returns", {})
     weights = result.get("weights", {})
     actual_prices_last_month = result.get("actual_prices_last_month", {})
+    actual_target_prices = result.get("actual_target_prices", {})
     forecast_horizon_days = result.get("forecast_horizon_days")
     selected_models = result.get("selected_models", {})
 
@@ -82,6 +83,11 @@ def save_results_to_supabase(result: dict[str, Any]) -> None:
             "forecast_horizon_days": forecast_horizon_days,
             "selected_model": selected_models.get(ticker),
             "actual_prices_last_month": json.dumps(actual_prices_last_month.get(ticker, [])),
+            "actual_target_price": (
+                float(actual_target_prices[ticker])
+                if ticker in actual_target_prices
+                else None
+            ),
             "portfolio_weight": float(weights.get(ticker, 0.0)),
         }
         rows.append(row)

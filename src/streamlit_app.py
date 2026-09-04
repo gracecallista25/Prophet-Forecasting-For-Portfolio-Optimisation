@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from functools import lru_cache
 
 import altair as alt
 import pandas as pd
@@ -90,51 +89,6 @@ def build_price_history(row: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame] | N
     predicted_df = pd.DataFrame({"date": [prediction_date], "price": [row["predicted_price"]]})
 
     return actual_df, predicted_df
-
-
-@lru_cache(maxsize=1)
-def compute_prediction_performance(data_json: str) -> pd.DataFrame:
-    """Evaluate forecasts once their target-date actual price is available."""
-
-    df = pd.read_json(data_json, orient="records", convert_dates=False)
-
-    if df.empty:
-        return pd.DataFrame()
-
-    df["as_of_date"] = pd.to_datetime(df["as_of_date"]).dt.date
-    df["forecast_target_date"] = pd.to_datetime(df["forecast_target_date"]).dt.date
-    df["actual_prices_last_month"] = df["actual_prices_last_month"].apply(_parse_price_history)
-
-    df["actual_price"] = df["actual_prices_last_month"].apply(
-        lambda prices: float(prices[-1]) if prices else None
-    )
-
-    forecasts = df[
-        ["ticker", "as_of_date", "forecast_target_date", "predicted_price"]
-    ].rename(
-        columns={
-            "as_of_date": "prediction_date",
-            "forecast_target_date": "target_date",
-        }
-    )
-
-    actuals = df[["ticker", "as_of_date", "actual_price"]].rename(
-        columns={"as_of_date": "target_date"}
-    )
-
-    results = forecasts.merge(actuals, on=["ticker", "target_date"], how="inner")
-    results = results.dropna(subset=["predicted_price", "actual_price"])
-
-    if results.empty:
-        return pd.DataFrame()
-
-    results["predicted_price"] = results["predicted_price"].astype(float)
-    results["actual_price"] = results["actual_price"].astype(float)
-    results["error"] = results["actual_price"] - results["predicted_price"]
-    results["absolute_error"] = results["error"].abs()
-    results["error_pct"] = results["absolute_error"] / results["actual_price"] * 100
-
-    return results
 
 
 def _latest_price_from_row(row: pd.Series) -> float | None:
@@ -261,6 +215,7 @@ def run_dashboard() -> None:
     ticker_row = date_df.set_index("ticker").loc[selected_ticker]
 
     latest_actual = _latest_actual_price(ticker_row)
+    actual_target_price = ticker_row.get("actual_target_price")
     selected_model = ticker_row.get("selected_model", "Unknown")
     predicted_price = float(ticker_row["predicted_price"])
     predicted_return = float(ticker_row["predicted_return"])
@@ -288,38 +243,28 @@ def run_dashboard() -> None:
 
     st.subheader("Prediction Accuracy")
 
-    if target_date is None:
-        st.info("No forecast target date is available.")
+    if pd.notna(actual_target_price):
+        actual_target_price = float(actual_target_price)
+        absolute_error = abs(actual_target_price - predicted_price)
+        error_pct = absolute_error / actual_target_price * 100
 
-    elif selected_date < target_date:
+        metrics = [
+            ("Predicted Price", f"${predicted_price:.2f}"),
+            ("Actual Price", f"${actual_target_price:.2f}"),
+            ("Absolute Error", f"${absolute_error:.2f}"),
+            ("Error (%)", f"{error_pct:.2f}%"),
+        ]
+
+        for col, (label, value) in zip(st.columns(4), metrics):
+            col.metric(label, value)
+
+    elif target_date and date.today() < target_date:
         st.info(f"⏳ Pending until {target_date:%Y-%m-%d}.")
 
     else:
-        perf_df = compute_prediction_performance(
-            df.to_json(orient="records", date_format="iso")
+        st.info(
+            "Target date has passed, but actual price data is not available yet."
         )
-
-        ticker_perf = perf_df[
-            (perf_df["ticker"] == selected_ticker)
-            & (perf_df["prediction_date"] == selected_date)
-        ]
-
-        if ticker_perf.empty:
-            st.info("Actual price data is not available for this forecast yet.")
-
-        else:
-            result = ticker_perf.iloc[0]
-
-            metrics = [
-                ("Predicted Price", f"${result['predicted_price']:.2f}"),
-                ("Actual Price", f"${result['actual_price']:.2f}"),
-                ("Absolute Error", f"${result['absolute_error']:.2f}"),
-                ("Error (%)", f"{result['error_pct']:.2f}%"),
-            ]
-
-            for col, (label, value) in zip(st.columns(4), metrics):
-                with col:
-                    st.metric(label, value)
 
 
 def main() -> None:
